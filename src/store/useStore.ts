@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware'
 import type {
   Device, BorrowRecord, DisinfectRecord, DamageReport, ExportHistory,
   DeviceStatus, BorrowStatus, DisinfectStatus, DamageStatus,
+  TaskExecution, TaskStats, TaskTrendPoint, TaskFilter, TaskStatus, TaskType,
 } from '@/types'
 
 interface ValidationError {
@@ -16,6 +17,8 @@ interface AppState {
   disinfectRecords: DisinfectRecord[]
   damageReports: DamageReport[]
   exportHistories: ExportHistory[]
+  taskExecutions: TaskExecution[]
+  taskFilter: TaskFilter
 
   addDevice: (device: Omit<Device, 'id' | 'createdAt' | 'status'>) => Device
   updateDevice: (id: string, updates: Partial<Device>) => void
@@ -35,6 +38,16 @@ interface AppState {
   exportDamageReport: (filters: { dateFrom: string; dateTo: string }) => ExportHistory
 
   getOverdueBorrows: () => BorrowRecord[]
+
+  setTaskFilter: (filter: Partial<TaskFilter>) => void
+  resetTaskFilter: () => void
+  getFilteredTasks: () => TaskExecution[]
+  getTaskStats: () => TaskStats
+  getTaskTrend: (days?: number) => TaskTrendPoint[]
+  getTaskById: (id: string) => TaskExecution | undefined
+  getTaskExecutionsByDevice: (deviceId: string) => TaskExecution[]
+  retryTask: (taskId: string) => TaskExecution | null
+  recordTaskExecution: (task: Omit<TaskExecution, 'id' | 'retryCount'>) => TaskExecution
 }
 
 const genId = () => crypto.randomUUID()
@@ -68,7 +81,80 @@ const buildSeedData = () => {
   return { devices, disinfectRecords }
 }
 
+const buildTaskSeedData = (devices: Device[]): TaskExecution[] => {
+  const tasks: TaskExecution[] = []
+  const now = new Date()
+  const failureReasons = [
+    '消毒温度未达标，实际温度110°C，要求121°C',
+    '消毒时间不足，实际15分钟，要求30分钟',
+    '责任人未确认，流程中断',
+    '设备检测异常，消毒效果验证失败',
+    '批次号重复，系统校验不通过',
+    '设备借出时状态异常',
+    '借用审批超时，自动驳回',
+  ]
+
+  const generateRandomTask = (baseDate: Date, index: number): TaskExecution => {
+    const device = devices[index % devices.length]
+    const isDisinfect = Math.random() > 0.4
+    const taskType: TaskType = isDisinfect ? 'disinfect' : 'borrow'
+    const taskName = isDisinfect ? `${device.name}消毒` : `${device.name}借用`
+    const isFailed = Math.random() < 0.2
+    const isInProgress = !isFailed && Math.random() < 0.1
+    const isPending = !isFailed && !isInProgress && Math.random() < 0.05
+
+    let status: TaskStatus = 'success'
+    if (isFailed) status = 'failed'
+    else if (isInProgress) status = 'in_progress'
+    else if (isPending) status = 'pending'
+
+    const startTime = new Date(baseDate.getTime() - Math.random() * 3600000 * 2)
+    const endTime = status === 'success' || status === 'failed'
+      ? new Date(startTime.getTime() + (isDisinfect ? 30 : 10) * 60000 + Math.random() * 600000)
+      : status === 'in_progress' ? '' : ''
+
+    const durationMs = endTime
+      ? new Date(endTime).getTime() - new Date(startTime).getTime()
+      : 0
+
+    return {
+      id: genId(),
+      taskType,
+      taskName,
+      relatedRecordId: genId(),
+      deviceId: device.id,
+      deviceName: device.name,
+      status,
+      startTime: startTime.toISOString(),
+      endTime: endTime ? endTime.toISOString() : '',
+      durationMs,
+      failureReason: isFailed ? failureReasons[Math.floor(Math.random() * failureReasons.length)] : undefined,
+      operator: ['张护士', '李消毒员', '王库管', '赵护士长'][Math.floor(Math.random() * 4)],
+      retryCount: isFailed && Math.random() < 0.3 ? Math.floor(Math.random() * 3) + 1 : 0,
+      lastRetryAt: isFailed && Math.random() < 0.3
+        ? new Date(startTime.getTime() + 3600000).toISOString()
+        : undefined,
+    }
+  }
+
+  for (let day = 29; day >= 0; day--) {
+    const date = new Date(now.getTime() - day * 86400000)
+    const tasksPerDay = Math.floor(Math.random() * 8) + 3
+    for (let i = 0; i < tasksPerDay; i++) {
+      const hour = 8 + Math.floor(Math.random() * 10)
+      const taskDate = new Date(date)
+      taskDate.setHours(hour, Math.floor(Math.random() * 60), 0, 0)
+      tasks.push(generateRandomTask(taskDate, tasks.length))
+    }
+  }
+
+  return tasks.sort((a, b) =>
+    new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
+  )
+}
+
 const seedData = buildSeedData()
+const taskSeedData = buildTaskSeedData(seedData.devices)
 
 export const useStore = create<AppState>()(
   persist(
@@ -78,6 +164,14 @@ export const useStore = create<AppState>()(
       disinfectRecords: seedData.disinfectRecords,
       damageReports: [],
       exportHistories: [],
+      taskExecutions: taskSeedData,
+      taskFilter: {
+        status: 'all',
+        taskType: 'all',
+        dateFrom: '',
+        dateTo: '',
+        keyword: '',
+      },
 
       addDevice: (deviceData) => {
         const device: Device = {
@@ -314,7 +408,7 @@ export const useStore = create<AppState>()(
       },
 
       exportDamageReport: (filters) => {
-        const { damageReports, devices, borrowRecords, disinfectRecords } = get()
+        const { damageReports, devices } = get()
         let filtered = damageReports
         if (filters.dateFrom) {
           filtered = filtered.filter((d) => new Date(d.reportDate) >= new Date(filters.dateFrom))
@@ -365,6 +459,185 @@ export const useStore = create<AppState>()(
         return get().borrowRecords.filter(
           (b) => b.status === 'checked_out' && new Date(b.expectedReturnDate) < now
         )
+      },
+
+      setTaskFilter: (filter) => {
+        set((s) => ({
+          taskFilter: { ...s.taskFilter, ...filter },
+        }))
+      },
+
+      resetTaskFilter: () => {
+        set({
+          taskFilter: {
+            status: 'all',
+            taskType: 'all',
+            dateFrom: '',
+            dateTo: '',
+            keyword: '',
+          },
+        })
+      },
+
+      getFilteredTasks: () => {
+        const { taskExecutions, taskFilter } = get()
+        return taskExecutions.filter((task) => {
+          if (taskFilter.status !== 'all' && task.status !== taskFilter.status) return false
+          if (taskFilter.taskType !== 'all' && task.taskType !== taskFilter.taskType) return false
+          if (taskFilter.dateFrom && new Date(task.startTime) < new Date(taskFilter.dateFrom)) return false
+          if (taskFilter.dateTo && new Date(task.startTime) > new Date(taskFilter.dateTo + 'T23:59:59')) return false
+          if (taskFilter.keyword) {
+            const keyword = taskFilter.keyword.toLowerCase()
+            const matchName = task.taskName.toLowerCase().includes(keyword)
+            const matchDevice = task.deviceName.toLowerCase().includes(keyword)
+            const matchOperator = task.operator?.toLowerCase().includes(keyword)
+            const matchReason = task.failureReason?.toLowerCase().includes(keyword)
+            if (!matchName && !matchDevice && !matchOperator && !matchReason) return false
+          }
+          return true
+        })
+      },
+
+      getTaskStats: () => {
+        const tasks = get().getFilteredTasks()
+        const completedTasks = tasks.filter((t) => t.status === 'success' || t.status === 'failed')
+        const successTasks = tasks.filter((t) => t.status === 'success')
+        const failedTasks = tasks.filter((t) => t.status === 'failed')
+        const inProgressTasks = tasks.filter((t) => t.status === 'in_progress')
+        const pendingTasks = tasks.filter((t) => t.status === 'pending')
+
+        const durations = completedTasks.filter((t) => t.durationMs > 0).map((t) => t.durationMs)
+        const avgDurationMs = durations.length > 0
+          ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
+          : 0
+        const maxDurationMs = durations.length > 0 ? Math.max(...durations) : 0
+        const maxDurationTask = durations.length > 0
+          ? completedTasks.find((t) => t.durationMs === maxDurationMs)
+          : undefined
+
+        let consecutiveFailures = 0
+        let lastConsecutiveFailureAt: string | undefined
+        const sortedByTime = [...tasks].sort((a, b) =>
+          new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
+        )
+        for (const task of sortedByTime) {
+          if (task.status === 'failed') {
+            consecutiveFailures++
+            if (!lastConsecutiveFailureAt) {
+              lastConsecutiveFailureAt = task.startTime
+            }
+          } else if (task.status === 'success') {
+            break
+          }
+        }
+
+        return {
+          totalCount: tasks.length,
+          successCount: successTasks.length,
+          failedCount: failedTasks.length,
+          inProgressCount: inProgressTasks.length,
+          pendingCount: pendingTasks.length,
+          successRate: completedTasks.length > 0
+            ? Math.round((successTasks.length / completedTasks.length) * 10000) / 100
+            : 0,
+          failureRate: completedTasks.length > 0
+            ? Math.round((failedTasks.length / completedTasks.length) * 10000) / 100
+            : 0,
+          avgDurationMs,
+          maxDurationMs,
+          maxDurationTaskId: maxDurationTask?.id,
+          consecutiveFailures,
+          lastConsecutiveFailureAt,
+        }
+      },
+
+      getTaskTrend: (days = 7) => {
+        const tasks = get().getFilteredTasks()
+        const now = new Date()
+        now.setHours(0, 0, 0, 0)
+
+        const trend: TaskTrendPoint[] = []
+        for (let i = days - 1; i >= 0; i--) {
+          const date = new Date(now)
+          date.setDate(date.getDate() - i)
+          const dateStr = date.toISOString().slice(0, 10)
+          const nextDate = new Date(date)
+          nextDate.setDate(nextDate.getDate() + 1)
+
+          const dayTasks = tasks.filter((t) => {
+            const taskDate = new Date(t.startTime)
+            return taskDate >= date && taskDate < nextDate
+          })
+
+          trend.push({
+            date: dateStr,
+            successCount: dayTasks.filter((t) => t.status === 'success').length,
+            failedCount: dayTasks.filter((t) => t.status === 'failed').length,
+            totalCount: dayTasks.length,
+          })
+        }
+        return trend
+      },
+
+      getTaskById: (id) => {
+        return get().taskExecutions.find((t) => t.id === id)
+      },
+
+      getTaskExecutionsByDevice: (deviceId) => {
+        return get().taskExecutions
+          .filter((t) => t.deviceId === deviceId)
+          .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime())
+          .slice(0, 10)
+      },
+
+      retryTask: (taskId) => {
+        const task = get().taskExecutions.find((t) => t.id === taskId)
+        if (!task || task.status !== 'failed') return null
+
+        const now = new Date()
+        const newTask: TaskExecution = {
+          id: genId(),
+          taskType: task.taskType,
+          taskName: task.taskName,
+          relatedRecordId: task.relatedRecordId,
+          deviceId: task.deviceId,
+          deviceName: task.deviceName,
+          status: 'in_progress',
+          startTime: now.toISOString(),
+          endTime: '',
+          durationMs: 0,
+          operator: '系统重试',
+          retryCount: task.retryCount + 1,
+          lastRetryAt: now.toISOString(),
+        }
+
+        setTimeout(() => {
+          set((s) => ({
+            taskExecutions: s.taskExecutions.map((t) =>
+              t.id === newTask.id
+                ? { ...t, status: 'success', endTime: new Date().toISOString(), durationMs: 1800000 }
+                : t
+            ),
+          }))
+        }, 2000)
+
+        set((s) => ({
+          taskExecutions: [newTask, ...s.taskExecutions],
+        }))
+
+        return newTask
+      },
+
+      recordTaskExecution: (taskData) => {
+        const task: TaskExecution = {
+          ...taskData,
+          id: genId(),
+          retryCount: 0,
+        }
+        set((s) => ({
+          taskExecutions: [task, ...s.taskExecutions],
+        }))
+        return task
       },
     }),
     {

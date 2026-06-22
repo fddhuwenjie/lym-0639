@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
-import { Database, ClipboardList, Droplets, FileWarning, AlertTriangle } from 'lucide-react'
+import { Database, ClipboardList, Droplets, FileWarning, AlertTriangle, BarChart3 } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 
 const navItems = [
@@ -8,6 +8,7 @@ const navItems = [
   { to: '/borrow', label: '借用看板', icon: ClipboardList },
   { to: '/disinfect', label: '消毒队列', icon: Droplets },
   { to: '/damage', label: '报损导出', icon: FileWarning },
+  { to: '/task-analysis', label: '质量分析', icon: BarChart3 },
 ]
 
 export default function Layout() {
