@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { Database, ClipboardList, Droplets, FileWarning, AlertTriangle } from 'lucide-react'
 import { useStore } from '@/store/useStore'
@@ -10,7 +11,14 @@ const navItems = [
 ]
 
 export default function Layout() {
-  const overdueBorrows = useStore((s) => s.getOverdueBorrows())
+  const borrowRecords = useStore((s) => s.borrowRecords)
+  const overdueBorrows = useMemo(
+    () =>
+      borrowRecords.filter(
+        (b) => b.status === 'checked_out' && new Date(b.expectedReturnDate) < new Date()
+      ),
+    [borrowRecords]
+  )
 
   return (
     <div className="flex h-screen overflow-hidden">

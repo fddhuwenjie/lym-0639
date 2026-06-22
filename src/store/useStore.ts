@@ -20,7 +20,7 @@ interface AppState {
   addDevice: (device: Omit<Device, 'id' | 'createdAt' | 'status'>) => Device
   updateDevice: (id: string, updates: Partial<Device>) => void
 
-  validateBorrow: (deviceId: string) => ValidationError[]
+  validateBorrow: (deviceId: string, excludeBorrowId?: string) => ValidationError[]
   createBorrowRequest: (data: Omit<BorrowRecord, 'id' | 'status' | 'approvedBy' | 'checkoutBy' | 'returnDepartment' | 'actualReturnDate' | 'checkoutDate'>) => BorrowRecord | null
   approveBorrow: (id: string, approver: string) => BorrowRecord | null
   checkoutBorrow: (id: string, operator: string) => BorrowRecord | null
@@ -96,7 +96,7 @@ export const useStore = create<AppState>()(
         }))
       },
 
-      validateBorrow: (deviceId) => {
+      validateBorrow: (deviceId, excludeBorrowId) => {
         const errors: ValidationError[] = []
         const { devices, borrowRecords, damageReports, disinfectRecords } = get()
         const device = devices.find((d) => d.id === deviceId)
@@ -111,7 +111,7 @@ export const useStore = create<AppState>()(
         }
 
         const activeBorrow = borrowRecords.find(
-          (b) => b.deviceId === deviceId && ['pending', 'approved', 'checked_out'].includes(b.status)
+          (b) => b.deviceId === deviceId && b.id !== excludeBorrowId && ['pending', 'approved', 'checked_out'].includes(b.status)
         )
         if (activeBorrow) {
           errors.push({ field: 'deviceId', message: '同一设备重复借出，该设备已有进行中的借用单' })
@@ -165,7 +165,7 @@ export const useStore = create<AppState>()(
         const record = get().borrowRecords.find((b) => b.id === id)
         if (!record || record.status !== 'pending') return null
 
-        const errors = get().validateBorrow(record.deviceId)
+        const errors = get().validateBorrow(record.deviceId, id)
         if (errors.length > 0) return null
 
         set((s) => ({
